@@ -1,0 +1,9 @@
+torch
+transformers
+accelerate
+fastapi
+uvicorn
+websockets
+numpy
+zstandard
+SQLAlchemy
