@@ -1,0 +1,25 @@
+{
+    "session_id": "sample-session",
+    "created_at": "2025-11-14T17:46:37.964825",
+    "model_name": "gpt2",
+    "model_config": {},
+    "capture_config": {
+        "capture_logits": true,
+        "capture_hidden_states": true,
+        "capture_attentions": true,
+        "capture_layers": 6,
+        "dtype_store": "float16",
+        "stream_mode": false,
+        "max_seq_len_to_keep": 1024,
+        "session_persistence_config": {
+            "artifact_dir": "experiments/samples"
+        },
+        "deterministic_seed": null
+    },
+    "prompt": "The quick brown fox jumps over the lazy",
+    "prompt_hash": "e79df309e6b0e98a1b677e5d47765063170fd0fbe136d305230dca2ca1ade525",
+    "length_prompt_tokens": 0,
+    "length_generated_tokens": 1,
+    "random_seed": null,
+    "hardware_snapshot": {}
+}
