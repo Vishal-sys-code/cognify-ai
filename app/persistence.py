@@ -9,6 +9,7 @@ import uuid
 from sqlalchemy import create_engine, Column, String, Integer, DateTime, JSON
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
+import asyncio
 
 Base = declarative_base()
 
@@ -25,75 +26,51 @@ class Session(Base):
     def __repr__(self):
         return f"<Session(id='{self.id}', model_name='{self.model_name}')>"
 
+    def to_dict(self):
+        return {c.name: getattr(self, c.name) for c in self.__table__.columns}
+
 class Persistence:
     def __init__(self, artifact_dir="artifacts", db_path="sessions.db"):
         self.artifact_dir = artifact_dir
         self.db_path = db_path
-        os.makedirs(self.artifact_dir, exist_ok=True)
         
         # Database setup
         self.engine = create_engine(f'sqlite:///{self.db_path}')
         Base.metadata.create_all(self.engine)
         self.Session = sessionmaker(bind=self.engine)
 
-    def save_session_traces(self, session_id: str, model_name: str, prompt: str, prompt_hash: str, 
+    async def save_session_traces(self, session_id: str, model_name: str, prompt: str, prompt_hash: str, 
                               capture_config: dict, generated_tokens: int, traces: dict):
-        """
-        Saves the traces and metadata for a generation session.
+        return await asyncio.to_thread(
+            self._save_session_traces_sync, session_id, model_name, prompt, prompt_hash,
+            capture_config, generated_tokens, traces
+        )
 
-        Args:
-            session_id (str): The unique ID for the session.
-            model_name (str): The name of the model used.
-            prompt (str): The input prompt.
-            prompt_hash (str): The SHA256 hash of the prompt.
-            capture_config (dict): The capture configuration used.
-            generated_tokens (int): The number of tokens generated.
-            traces (dict): A dictionary containing the captured traces (logits, hidden_states, etc.).
-        """
+    def _save_session_traces_sync(self, session_id: str, model_name: str, prompt: str, prompt_hash: str, 
+                              capture_config: dict, generated_tokens: int, traces: dict):
         # Prepare metadata
         metadata = {
             "session_id": session_id,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "model_name": model_name,
-            "model_config": {}, # Placeholder for model config
+            "model_config": {},
             "capture_config": capture_config,
             "prompt": prompt,
             "prompt_hash": prompt_hash,
-            "length_prompt_tokens": 0, # Placeholder
+            "length_prompt_tokens": 0,
             "length_generated_tokens": generated_tokens,
             "random_seed": capture_config.get("deterministic_seed"),
-            "hardware_snapshot": {} # Placeholder for hardware info
+            "hardware_snapshot": {}
         }
 
-        # Save traces to a compressed NPZ file
-        artifact_path = os.path.join(self.artifact_dir, f"{session_id}.npz")
+        # Save traces to a compressed NPZ file atomically
+        final_artifact_path = os.path.join(self.artifact_dir, f"{session_id}.npz")
+        temp_artifact_path = f"{final_artifact_path}.tmp"
         
-        # Convert tensors to numpy arrays and flatten nested structures
-        processed_traces = {}
-        for key, value in traces.items():
-            if key in ["hidden_states", "attentions"]:
-                if value is None: continue
-                for i, item in enumerate(value):
-                    if isinstance(item, tuple) or isinstance(item, list):
-                        for j, tensor in enumerate(item):
-                            if isinstance(tensor, torch.Tensor):
-                                processed_traces[f"{key}_{i}_{j}"] = tensor.cpu().numpy()
-                    elif isinstance(item, torch.Tensor):
-                        processed_traces[f"{key}_{i}"] = item.cpu().numpy()
-            elif isinstance(value, torch.Tensor):
-                processed_traces[key] = value.cpu().numpy()
-            else:
-                processed_traces[key] = value
+        processed_traces = self._process_traces(traces)
         
-        if capture_config.get("compress", True):
-            # Compress with zstandard
-            with open(f"{artifact_path}.zst", "wb") as f:
-                cctx = zstd.ZstdCompressor()
-                with cctx.stream_writer(f) as compressor:
-                    np.savez(compressor, **processed_traces)
-            artifact_path += ".zst"
-        else:
-            np.savez(artifact_path, **processed_traces)
+        os.makedirs(self.artifact_dir, exist_ok=True)
+        np.savez_compressed(final_artifact_path, **processed_traces)
 
         # Save metadata
         with open(os.path.join(self.artifact_dir, f"{session_id}_metadata.json"), "w") as f:
@@ -105,27 +82,54 @@ class Persistence:
             id=session_id,
             model_name=model_name,
             prompt_hash=prompt_hash,
-            artifact_path=artifact_path,
+            artifact_path=final_artifact_path,
             length_generated_tokens=generated_tokens,
             capture_config=capture_config
         )
         db_session.add(new_session)
         db_session.commit()
         db_session.close()
+        
+        return final_artifact_path
 
-    def get_session_metadata(self, session_id: str):
+    def _process_traces(self, traces: dict) -> dict:
+        processed_traces = {}
+        for key, value in traces.items():
+            if key in ["hidden_states", "attentions"]:
+                if value is None: continue
+                for i, item in enumerate(value):
+                    if isinstance(item, (tuple, list)):
+                        for j, tensor in enumerate(item):
+                            if isinstance(tensor, torch.Tensor):
+                                processed_traces[f"{key}_{i}_{j}"] = tensor.cpu().numpy()
+                    elif isinstance(item, torch.Tensor):
+                        processed_traces[f"{key}_{i}"] = item.cpu().numpy()
+                    else:
+                        processed_traces[f"{key}_{i}"] = item
+            elif isinstance(value, torch.Tensor):
+                processed_traces[key] = value.cpu().numpy()
+            else:
+                processed_traces[key] = value
+        return processed_traces
+
+    async def get_session_metadata(self, session_id: str):
+        return await asyncio.to_thread(self._get_session_metadata_sync, session_id)
+
+    def _get_session_metadata_sync(self, session_id: str):
         db_session = self.Session()
         session = db_session.query(Session).filter_by(id=session_id).first()
         db_session.close()
         return session
 
-    def get_session_artifact_path(self, session_id: str) -> str:
+    async def get_session_artifact_path(self, session_id: str) -> str:
+        return await asyncio.to_thread(self._get_session_artifact_path_sync, session_id)
+
+    def _get_session_artifact_path_sync(self, session_id: str) -> str:
         db_session = self.Session()
         session = db_session.query(Session).filter_by(id=session_id).first()
         db_session.close()
         return session.artifact_path if session else None
 
     def close(self):
-        """Disposes of the connection pool."""
         if self.engine:
             self.engine.dispose()

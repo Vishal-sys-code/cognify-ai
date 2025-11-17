@@ -40,17 +40,17 @@ class InstrumentedModel:
         )
         os.makedirs(self.capture_config["session_persistence_config"]["artifact_dir"], exist_ok=True)
 
-    def generate_with_traces(self, session_id: str, prompt: str, max_new_tokens: int, temperature: float = 0.0,
-                             stream_callback: Optional[Callable] = None):
+    async def generate_with_traces(self, session_id: str, prompt: str, max_new_tokens: int, temperature: float = 0.0,
+                             stream_callback: Optional[Callable] = None, stream: bool = False, **kwargs):
         if self.capture_config.get("deterministic_seed") is not None:
             torch.manual_seed(self.capture_config["deterministic_seed"])
 
-        if self.capture_config.get("stream_mode", False):
-            self._generate_streaming(session_id, prompt, max_new_tokens, temperature, stream_callback)
+        if stream:
+            return await self._generate_streaming(session_id, prompt, max_new_tokens, temperature, stream_callback)
         else:
-            self._generate_batched(session_id, prompt, max_new_tokens, temperature)
+            return await self._generate_batched(session_id, prompt, max_new_tokens, temperature)
 
-    def _generate_batched(self, session_id: str, prompt: str, max_new_tokens: int, temperature: float):
+    async def _generate_batched(self, session_id: str, prompt: str, max_new_tokens: int, temperature: float):
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         
         outputs = self.model.generate(
@@ -72,10 +72,9 @@ class InstrumentedModel:
             "attentions": outputs.get("attentions"),
         }
 
-        self._persist_traces(session_id, prompt, prompt_hash, generated_tokens_count, traces)
-        return session_id
+        return await self._persist_traces(session_id, prompt, prompt_hash, generated_tokens_count, traces)
 
-    def _generate_streaming(self, session_id: str, prompt: str, max_new_tokens: int, temperature: float, 
+    async def _generate_streaming(self, session_id: str, prompt: str, max_new_tokens: int, temperature: float, 
                             stream_callback: Optional[Callable]):
         
         input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids.to(self.device)
@@ -140,15 +139,13 @@ class InstrumentedModel:
             "attentions": all_attentions if self.capture_config["capture_attentions"] else None,
         }
         
-        self._persist_traces(session_id, prompt, prompt_hash, generated_tokens_count, traces)
-        
         if stream_callback:
             stream_callback({"message_type": "generation_end", "session_id": session_id})
             
-        return session_id
+        return await self._persist_traces(session_id, prompt, prompt_hash, generated_tokens_count, traces)
 
-    def _persist_traces(self, session_id, prompt, prompt_hash, generated_tokens_count, traces):
-        self.persistence.save_session_traces(
+    async def _persist_traces(self, session_id, prompt, prompt_hash, generated_tokens_count, traces):
+        return await self.persistence.save_session_traces(
             session_id=session_id,
             model_name=self.model_identifier,
             prompt=prompt,
@@ -158,30 +155,38 @@ class InstrumentedModel:
             traces=traces
         )
 
-    def intervene_and_regenerate(self, session_id: str, modifications: dict):
-        # For Phase 1, we only support modifying the input prompt
-        original_session = self.persistence.get_session_metadata(session_id)
+    async def intervene_and_regenerate(self, session_id: str, modifications: dict):
+        # For Phase 2, we support modifications based on the spec
+        original_session = await self.persistence.get_session_metadata(session_id)
         if not original_session:
             return None
         
-        # This is a simplified way to get the original prompt.
-        # In a real application, you would have a more robust way to retrieve it.
+        # Retrieve the original prompt from metadata
         metadata_path = os.path.join(self.persistence.artifact_dir, f"{session_id}_metadata.json")
+        # This is still a synchronous file read, for a production system, this should be async
         with open(metadata_path, "r") as f:
             metadata = json.load(f)
         original_prompt = metadata["prompt"]
         
+        # This is a simplified application of modifications. A real implementation
+        # would tokenize the prompt and apply token-level modifications.
         modified_prompt = original_prompt
-        if "prompt" in modifications:
+        if "prompt" in modifications: # Simplified for now
             modified_prompt = modifications["prompt"]
             
         new_session_id = str(uuid.uuid4())
         
-        # Re-run generation with the modified prompt and the same seed
-        self.generate_with_traces(
-            session_id=new_session_id,
+        # Re-run generation with the modified prompt.
+        # This should use the same async task pattern as the main generate endpoint.
+        from .schemas import GenerateRequest
+        new_request = GenerateRequest(
             prompt=modified_prompt,
             max_new_tokens=original_session.length_generated_tokens,
             temperature=0.0, # Interventions are typically deterministic
+            deterministic_seed=original_session.capture_config.get("deterministic_seed")
         )
+
+        from .main import run_generation_task
+        await run_generation_task(uuid.UUID(new_session_id), new_request)
+        
         return new_session_id

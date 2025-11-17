@@ -5,5 +5,11 @@ fastapi
 uvicorn
 websockets
 numpy
+httpx
 zstandard
+scikit-learn
 SQLAlchemy
+prometheus-fastapi-instrumentator
+nvidia-ml-py
+pytest
+pytest-asyncio
