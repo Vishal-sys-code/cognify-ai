@@ -1,8 +1,6 @@
 import { useState } from "react";
 import { Button } from "./ui/button";
-import { Checkbox } from "./ui/checkbox";
-import { Label } from "./ui/label";
-import { Check, Copy, Link2 } from "lucide-react";
+import { Check, Copy, Share2 } from "lucide-react";
 import { toast } from "sonner";
 
 interface SessionShareProps {
@@ -10,24 +8,37 @@ interface SessionShareProps {
 }
 
 export const SessionShare = ({ sessionId }: SessionShareProps) => {
-  const [isPrivate, setIsPrivate] = useState(false);
   const [copied, setCopied] = useState(false);
 
   const generateShareLink = () => {
     const baseUrl = window.location.origin;
-    const expiryParam = isPrivate ? "?expire=24h" : "";
-    return `${baseUrl}/session/${sessionId}${expiryParam}`;
+    return `${baseUrl}/session/${sessionId}`;
   };
 
-  const handleCopyLink = async () => {
-    const link = generateShareLink();
-    try {
-      await navigator.clipboard.writeText(link);
-      setCopied(true);
-      toast.success("Link copied to clipboard");
-      setTimeout(() => setCopied(false), 2000);
-    } catch (err) {
-      toast.error("Failed to copy link");
+  const handleShare = async () => {
+    const shareLink = generateShareLink();
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: "Cognify.AI Session",
+          text: "Check out this analysis session!",
+          url: shareLink,
+        });
+        toast.success("Session shared successfully!");
+      } catch (error) {
+        console.error("Error sharing session:", error);
+        toast.error("Failed to share session");
+      }
+    } else {
+      // Fallback for browsers that don't support the Share API
+      try {
+        await navigator.clipboard.writeText(shareLink);
+        setCopied(true);
+        toast.success("Link copied to clipboard");
+        setTimeout(() => setCopied(false), 2000);
+      } catch (err) {
+        toast.error("Failed to copy link");
+      }
     }
   };
 
@@ -36,26 +47,12 @@ export const SessionShare = ({ sessionId }: SessionShareProps) => {
       <div className="space-y-2">
         <h3 className="text-sm font-medium">Share Session</h3>
         <p className="text-xs text-muted-foreground">
-          Generate a shareable link to this analysis session
+          Share a link to this analysis session.
         </p>
       </div>
 
-      <div className="flex items-center gap-2">
-        <Checkbox
-          id="private-link"
-          checked={isPrivate}
-          onCheckedChange={(checked) => setIsPrivate(checked as boolean)}
-        />
-        <Label
-          htmlFor="private-link"
-          className="text-sm font-normal cursor-pointer"
-        >
-          Private link (expires in 24h)
-        </Label>
-      </div>
-
       <Button
-        onClick={handleCopyLink}
+        onClick={handleShare}
         className="w-full gap-2"
         variant={copied ? "secondary" : "default"}
       >
@@ -66,17 +63,11 @@ export const SessionShare = ({ sessionId }: SessionShareProps) => {
           </>
         ) : (
           <>
-            <Link2 className="w-4 h-4" />
-            Copy Share Link
+            <Share2 className="w-4 h-4" />
+            Share Session
           </>
         )}
       </Button>
-
-      {sessionId && (
-        <div className="mt-2 p-2 bg-muted rounded text-xs font-mono break-all text-muted-foreground">
-          {generateShareLink()}
-        </div>
-      )}
     </div>
   );
 };

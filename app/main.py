@@ -142,6 +142,51 @@ async def get_traces(session_id: uuid.UUID):
         precomputed=precomputed_artifacts,
     )
 
+from fastapi.responses import JSONResponse
+import numpy as np
+
+from fastapi import Query
+
+@app.get("/api/session/{session_id}/artifact/{artifact_name}", tags=["API"])
+async def get_artifact_as_json(
+    session_id: uuid.UUID,
+    artifact_name: str,
+    layer: int = Query(None),
+    head: int = Query(None),
+    average: bool = Query(False),
+):
+    """Gets a precomputed artifact and returns it as JSON."""
+    session = sessions.get(session_id)
+    if not session or 'artifact_path' not in session:
+        raise HTTPException(status_code=404, detail="Session artifact not found")
+    
+    base_artifact_path = os.path.splitext(session['artifact_path'])[0]
+    artifact_filename = f"{base_artifact_path}.{artifact_name}.npz"
+    
+    if not os.path.exists(artifact_filename):
+        raise HTTPException(status_code=404, detail="Artifact not found")
+        
+    try:
+        data = np.load(artifact_filename)
+        # Assuming the main data is in a key named 'arr_0' or the first key
+        key = data.files[0]
+        array_data = data[key]
+
+        if artifact_name == "attention_rollout":
+            # This is where you would add your logic to select the correct layer and head
+            # For now, we'll just return the first layer and head
+            if layer is not None and head is not None and not average:
+                # Placeholder for selecting a specific head from a specific layer
+                pass
+            elif average:
+                # Placeholder for averaging heads
+                pass
+        
+        return JSONResponse(content={"data": array_data.tolist()})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing artifact: {e}")
+
+
 @app.websocket("/ws/session/{session_id}")
 async def websocket_endpoint(websocket: WebSocket, session_id: uuid.UUID):
     """WebSocket endpoint for streaming generation results."""

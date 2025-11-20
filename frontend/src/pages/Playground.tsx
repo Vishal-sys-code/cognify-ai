@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Header } from "@/components/Header";
 import { Footer } from "@/components/Footer";
 import { AnimatedBackground } from "@/components/AnimatedBackground";
@@ -12,55 +12,6 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { MessageSquare, Cpu, Bot, GitBranch, Share2, Info } from "lucide-react";
 
-// Demo data for showcase
-const generateDemoTokens = (): Token[] => {
-  const words = ["The", "quick", "brown", "fox", "jumps", "over", "the", "lazy", "dog", "in", "the", "garden"];
-  return words.map((word, i) => ({
-    id: `token-${i}`,
-    text: word,
-    activation: Math.random() * 0.8 + 0.2,
-    probabilities: [
-      { token: word, prob: Math.random() * 0.5 + 0.5 },
-      { token: "alt1", prob: Math.random() * 0.3 },
-      { token: "alt2", prob: Math.random() * 0.2 },
-    ],
-    timestamp: Date.now() + i * 100,
-  }));
-};
-
-const demoCoTSteps: CoTStep[] = [
-  {
-    id: "step-1",
-    stepNumber: 1,
-    summary: "Understanding the context",
-    fullText: "The model first analyzes the input prompt to understand the overall context and intent. It identifies key entities and relationships between them.",
-    tokenRange: [0, 3],
-  },
-  {
-    id: "step-2",
-    stepNumber: 2,
-    summary: "Planning response structure",
-    fullText: "Based on the context, the model plans the structure of its response. It determines what information needs to be conveyed and in what order.",
-    tokenRange: [4, 7],
-  },
-  {
-    id: "step-3",
-    stepNumber: 3,
-    summary: "Generating output",
-    fullText: "The model generates the output tokens while maintaining coherence with the planned structure and original context.",
-    tokenRange: [8, 11],
-  },
-];
-
-const generateDemoHeatmap = (size: number): number[][] => {
-  return Array.from({ length: size }, (_, i) =>
-    Array.from({ length: size }, (_, j) => {
-      const distance = Math.abs(i - j);
-      return Math.max(0, 1 - distance / size) * Math.random();
-    })
-  );
-};
-
 export default function Playground() {
   const [model, setModel] = useState("gpt-4");
   const [temperature, setTemperature] = useState(0.7);
@@ -68,7 +19,9 @@ export default function Playground() {
   const [tokens, setTokens] = useState<Token[]>([]);
   const [selectedTokenId, setSelectedTokenId] = useState<string | null>(null);
   const [cotSteps, setCoTSteps] = useState<CoTStep[]>([]);
-  const [sessionId] = useState("demo-session-123");
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [prompt, setPrompt] = useState<string>("");
+  const ws = useRef<WebSocket | null>(null);
 
   // Heatmap state
   const [selectedLayer, setSelectedLayer] = useState(0);
@@ -78,34 +31,144 @@ export default function Playground() {
   const [isLoadingHeatmap, setIsLoadingHeatmap] = useState(false);
 
   const handleRun = async (prompt: string, enableCoT: boolean) => {
+    setPrompt(prompt);
     setIsRunning(true);
     setTokens([]);
     setCoTSteps([]);
     setHeatmapData(undefined);
     setSelectedTokenId(null);
+    setSessionId(null);
 
-    // Simulate streaming tokens
-    const demoTokens = generateDemoTokens();
-    for (let i = 0; i < demoTokens.length; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      setTokens((prev) => [...prev, demoTokens[i]]);
+    try {
+      const response = await fetch("/api/generate", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          prompt: prompt,
+          cot: enableCoT,
+          stream: true,
+          temperature: temperature,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to start analysis session");
+      }
+
+      const data = await response.json();
+      setSessionId(data.session_id);
+
+      const wsUrl = `ws://${window.location.host}${data.ws_url}`;
+      ws.current = new WebSocket(wsUrl);
+
+      ws.current.onopen = () => {
+        ws.current?.send(JSON.stringify({ client_id: "frontend" }));
+      };
+
+      ws.current.onmessage = (event) => {
+        const message = JSON.parse(event.data);
+        if (message.message_type === "token_partial") {
+          const newToken = {
+            id: `token-${message.token_index}`,
+            text: message.token_string,
+            activation: Math.random(),
+            probabilities: [],
+            timestamp: Date.now(),
+          };
+          setTokens((prev) => [...prev, newToken]);
+        } else if (message.message_type === "generation_end") {
+          setIsRunning(false);
+        }
+      };
+
+      ws.current.onclose = () => {
+        setIsRunning(false);
+      };
+
+      ws.current.onerror = (error) => {
+        console.error("WebSocket error:", error);
+        setIsRunning(false);
+      };
+
+    } catch (error) {
+      console.error("Error running analysis:", error);
+      setIsRunning(false);
     }
+  };
+  
+    useEffect(() => {
+    if (sessionId && !isRunning) {
+      const interval = setInterval(() => {
+        fetchTraces(sessionId);
+      }, 5000); // Poll every 5 seconds
 
-    // Load CoT steps
-    if (enableCoT) {
-      setCoTSteps(demoCoTSteps);
+      return () => clearInterval(interval);
     }
+  }, [sessionId, isRunning]);
 
-    // Load heatmap
+  useEffect(() => {
+    if (prompt) {
+      handleRun(prompt, true);
+    }
+  }, [temperature]);
+
+  useEffect(() => {
+    if (sessionId) {
+      fetchHeatmap();
+    }
+  }, [selectedLayer, selectedHead, averageHeads]);
+
+
+  const fetchHeatmap = async () => {
+    if (!sessionId) return;
     setIsLoadingHeatmap(true);
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    setHeatmapData(generateDemoHeatmap(12));
-    setIsLoadingHeatmap(false);
-
-    setIsRunning(false);
+    try {
+      const response = await fetch(`/api/session/${sessionId}/artifact/attention_rollout?layer=${selectedLayer}&head=${selectedHead}&average=${averageHeads}`);
+      if(response.ok) {
+        const heatmapJson = await response.json();
+        setHeatmapData(heatmapJson.data);
+      }
+    } catch (error) {
+      console.error("Error fetching heatmap:", error);
+    } finally {
+      setIsLoadingHeatmap(false);
+    }
   };
 
+  const fetchTraces = async (sessionId: string) => {
+    try {
+      setIsLoadingHeatmap(true);
+      const response = await fetch(`/api/session/${sessionId}/traces`);
+      if(response.ok) {
+        const traces = await response.json();
+          if (traces.status === "completed") {
+            fetchHeatmap();
+            if (traces.precomputed && traces.precomputed.length > 0) {
+                const cotArtifact = traces.precomputed.find((p: any) => p.name === "cot_steps");
+                if (cotArtifact) {
+                    const cotResponse = await fetch(`/api/session/${sessionId}/artifact/cot_steps`);
+                    if(cotResponse.ok) {
+                        const cotJson = await cotResponse.json();
+                        setCoTSteps(cotJson.data);
+                    }
+                }
+            }
+        }
+      }
+    } catch (error) {
+        console.error("Error fetching traces:", error);
+    } finally {
+        setIsLoadingHeatmap(false);
+    }
+  };
+
+
   const handleCancel = () => {
+    if (ws.current) {
+      ws.current.close();
+    }
     setIsRunning(false);
   };
 
@@ -113,29 +176,19 @@ export default function Playground() {
     const [start, end] = tokenRange;
     if (tokens[start]) {
       setSelectedTokenId(tokens[start].id);
-      // Scroll to token would happen here
     }
-  };
-
-  const scrollToPrompt = () => {
-    const el = document.getElementById("prompt-editor");
-    if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
   };
 
   return (
     <div className="flex flex-col min-h-screen relative overflow-hidden">
       <AnimatedBackground />
 
-      <Header selectedModel={model} onModelChange={setModel} />
+      <Header />
 
       <main className="flex-1">
         <div className="container mx-auto max-w-[1400px] px-4 sm:px-6 lg:px-8 py-8">
-          {/* Hero removed per design request - minimal top spacing */}
-          {/* Grid Layout */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-12">
-            {/* Left Column - 7 columns */}
             <div className="lg:col-span-7 space-y-8" style={{ animationDelay: "100ms" }}>
-              {/* Prompt Editor */}
               <div id="prompt-editor">
                 <Card className="glass-card group hover:bg-white/10 transition-colors duration-300 stagger animate-slide-up">
                 <CardHeader>
@@ -155,7 +208,6 @@ export default function Playground() {
                 </Card>
               </div>
 
-              {/* Model Controls */}
               <Card
                 className="glass-card group hover:bg-white/10 transition-colors duration-300 stagger animate-slide-up"
                 style={{ animationDelay: "200ms" }}
@@ -177,7 +229,6 @@ export default function Playground() {
                 </CardContent>
               </Card>
 
-              {/* Token Timeline */}
               <Card
                 className="glass-card group hover:bg-white/10 transition-colors duration-300 stagger animate-slide-up"
                 style={{ animationDelay: "300ms" }}
@@ -199,7 +250,6 @@ export default function Playground() {
                 </CardContent>
               </Card>
 
-              {/* Chain of Thought */}
               <Card
                 className="glass-card group hover:bg-white/10 transition-colors duration-300 stagger animate-slide-up"
                 style={{ animationDelay: "400ms" }}
@@ -220,9 +270,7 @@ export default function Playground() {
               </Card>
             </div>
 
-            {/* Right Column - 5 columns */}
             <div className="lg:col-span-5 space-y-6">
-              {/* Attention Heatmap */}
               <Card
                 className="glass-card group hover:bg-white/10 transition-colors duration-300 stagger animate-slide-up"
                 style={{ animationDelay: "500ms" }}
@@ -250,7 +298,6 @@ export default function Playground() {
                 </CardContent>
               </Card>
 
-              {/* Model Info */}
               <Card
                 className="glass-card group hover:bg-white/10 transition-colors duration-300 stagger animate-slide-up"
                 style={{ animationDelay: "600ms" }}
@@ -280,18 +327,18 @@ export default function Playground() {
                 </CardContent>
               </Card>
 
-              {/* Session Share */}
-              <div
-                className="stagger animate-slide-up"
-                style={{ animationDelay: "700ms" }}
-              >
-                <SessionShare sessionId={sessionId} />
-              </div>
+              {sessionId &&
+                <div
+                  className="stagger animate-slide-up"
+                  style={{ animationDelay: "700ms" }}
+                >
+                  <SessionShare sessionId={sessionId} />
+                </div>
+              }
             </div>
           </div>
         </div>
       </main>
-
       <Footer />
     </div>
   );
