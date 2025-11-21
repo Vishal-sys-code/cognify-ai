@@ -1,5 +1,5 @@
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request
 from .instrumented_model import InstrumentedModel
 from .persistence import Persistence
 import os
@@ -49,6 +49,30 @@ process_pool = concurrent.futures.ProcessPoolExecutor()
 async def run_generation_task(session_id: uuid.UUID, request: GenerateRequest):
     """The actual generation logic, designed to be run as a background task."""
     sessions[session_id] = {'status': 'in_progress'}
+
+    def stream_callback(data):
+        message_type = data.get("message_type")
+        
+        if message_type == "token_partial":
+            # This is a token update
+            formatted_message = {
+                "type": "token",
+                "token_index": data.get("token_index"),
+                "token_text": data.get("token_string"),
+            }
+        elif message_type == "cot_step":
+            # This is a Chain-of-Thought update
+            formatted_message = {
+                "type": "cot",
+                "chunk_index": data.get("step_index"),
+                "chunk_text": data.get("step_string"),
+            }
+        else:
+            # For other message types, pass them as is
+            formatted_message = data
+
+        asyncio.create_task(stream_manager.broadcast(session_id, formatted_message))
+    
     try:
         # The result of generate_with_traces is the artifact path
         artifact_path = await instrumented_model.generate_with_traces(
@@ -56,7 +80,7 @@ async def run_generation_task(session_id: uuid.UUID, request: GenerateRequest):
             prompt=request.prompt,
             max_new_tokens=request.max_new_tokens,
             temperature=request.temperature,
-            stream_callback=lambda data: asyncio.create_task(stream_manager.broadcast(session_id, data)),
+            stream_callback=stream_callback,
             stream=request.stream
         )
         sessions[session_id]['status'] = 'completed'
@@ -74,29 +98,35 @@ async def run_generation_task(session_id: uuid.UUID, request: GenerateRequest):
         sessions[session_id]['error'] = str(e)
     finally:
         # Signal the end of the stream to any connected clients
-        await stream_manager.broadcast(session_id, {"message_type": "generation_end"})
+        await stream_manager.broadcast(session_id, {
+            "type": "generation_end",
+            "artifact_url": f"/api/session/{session_id}/artifact/attention_rollout"
+            })
 
 
 @app.post("/api/generate", response_model=GenerateResponse, tags=["API"])
-async def generate_request(request: GenerateRequest):
+async def generate_request(req: Request, request: GenerateRequest):
     """Starts a new generation session."""
     session_id = uuid.uuid4()
     
-    if not request.stream:
-        # Run generation in a background thread and wait for it to complete.
-        await run_generation_task(session_id, request)
-        return GenerateResponse(
-            session_id=session_id,
-            status_url=f"/api/session/{session_id}/traces",
-        )
+    host = req.client.host
+    port = 8000 # Fixme, this should be discoverable
+    
+    status_url = f"http://{host}:{port}/api/session/{session_id}/status"
+    ws_url = f"ws://{host}:{port}/ws/session/{session_id}"
 
     # For streaming requests, start the generation as a background task.
-    await run_generation_task(session_id, request)
-    
+    if request.stream:
+        await stream_manager.create_session(session_id)
+        asyncio.create_task(run_generation_task(session_id, request))
+    else:
+        # Run generation synchronously if not streaming
+        await run_generation_task(session_id, request)
+
     return GenerateResponse(
         session_id=session_id,
-        status_url=f"/api/session/{session_id}/traces",
-        ws_url=f"/ws/session/{session_id}",
+        status_url=status_url,
+        ws_url=ws_url if request.stream else None,
     )
 
 @app.get("/api/session/{session_id}/traces", response_model=TracesResponse, tags=["API"])
@@ -147,42 +177,32 @@ import numpy as np
 
 from fastapi import Query
 
-@app.get("/api/session/{session_id}/artifact/{artifact_name}", tags=["API"])
-async def get_artifact_as_json(
+@app.get("/api/session/{session_id}/attn", tags=["API"])
+async def get_attention_slice(
     session_id: uuid.UUID,
-    artifact_name: str,
-    layer: int = Query(None),
-    head: int = Query(None),
-    average: bool = Query(False),
+    layer: int = Query(...),
+    head: int = Query(...),
 ):
-    """Gets a precomputed artifact and returns it as JSON."""
+    """Gets a specific attention slice from the artifact."""
     session = sessions.get(session_id)
     if not session or 'artifact_path' not in session:
         raise HTTPException(status_code=404, detail="Session artifact not found")
-    
-    base_artifact_path = os.path.splitext(session['artifact_path'])[0]
-    artifact_filename = f"{base_artifact_path}.{artifact_name}.npz"
-    
-    if not os.path.exists(artifact_filename):
-        raise HTTPException(status_code=404, detail="Artifact not found")
-        
-    try:
-        data = np.load(artifact_filename)
-        # Assuming the main data is in a key named 'arr_0' or the first key
-        key = data.files[0]
-        array_data = data[key]
 
-        if artifact_name == "attention_rollout":
-            # This is where you would add your logic to select the correct layer and head
-            # For now, we'll just return the first layer and head
-            if layer is not None and head is not None and not average:
-                # Placeholder for selecting a specific head from a specific layer
-                pass
-            elif average:
-                # Placeholder for averaging heads
-                pass
-        
-        return JSONResponse(content={"data": array_data.tolist()})
+    artifact_path = session['artifact_path']
+    if not os.path.exists(artifact_path):
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    try:
+        with np.load(artifact_path) as data:
+            attention_data = data['attention']
+            # attention_data shape: (layers, heads, seq_len, seq_len)
+            attn_slice = attention_data[layer, head, :, :].tolist()
+
+        return JSONResponse(content={
+            "layer": layer,
+            "head": head,
+            "attn": attn_slice,
+        })
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing artifact: {e}")
 
@@ -216,6 +236,53 @@ async def websocket_endpoint(websocket: WebSocket, session_id: uuid.UUID):
     finally:
         await stream_manager.remove_client(session_id, queue)
         await websocket.close()
+
+
+@app.get("/api/debug/generate_sample", tags=["Debug"])
+async def generate_sample():
+    """Generates a sample session for debugging purposes."""
+    session_id = uuid.uuid4()
+    sessions[session_id] = {
+        'status': 'completed',
+        'artifact_path': 'sample_artifacts/sample.npz'
+    }
+
+    async def sample_stream():
+        tokens = ["This", " is", " a", " test", " prompt", ".", " The", " model", " is", " working", "."]
+        for i, token in enumerate(tokens):
+            await stream_manager.broadcast(session_id, {
+                "type": "token",
+                "token_index": i,
+                "token_text": token
+            })
+            await asyncio.sleep(0.1)
+
+        cot_steps = [
+            "Step 1: This is the first step.",
+            "Step 2: This is the second step.",
+            "Step 3: This is the third step."
+        ]
+        for i, step in enumerate(cot_steps):
+            await stream_manager.broadcast(session_id, {
+                "type": "cot",
+                "chunk_index": i,
+                "chunk_text": step
+            })
+            await asyncio.sleep(0.1)
+        
+        await stream_manager.broadcast(session_id, {
+            "type": "generation_end",
+            "artifact_url": f"/api/session/{session_id}/artifact/attention_rollout",
+            "precomputed": {}
+        })
+
+    asyncio.create_task(sample_stream())
+
+    return {
+        "session_id": session_id,
+        "ws_url": f"/ws/session/{session_id}",
+        "status_url": f"/api/session/{session_id}/traces"
+    }
 
 
 @app.post("/api/intervene", response_model=InterveneResponse, tags=["API"])

@@ -15,6 +15,7 @@ import { MessageSquare, Cpu, Bot, GitBranch, Share2, Info } from "lucide-react";
 export default function Playground() {
   const [model, setModel] = useState("gpt-4");
   const [temperature, setTemperature] = useState(0.7);
+  const [isRerunRequired, setIsRerunRequired] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [tokens, setTokens] = useState<Token[]>([]);
   const [selectedTokenId, setSelectedTokenId] = useState<string | null>(null);
@@ -30,6 +31,69 @@ export default function Playground() {
   const [heatmapData, setHeatmapData] = useState<number[][] | undefined>();
   const [isLoadingHeatmap, setIsLoadingHeatmap] = useState(false);
 
+  const handleDebugRun = async () => {
+    setIsRunning(true);
+    setTokens([]);
+    setCoTSteps([]);
+    setHeatmapData(undefined);
+    setSelectedTokenId(null);
+    setSessionId(null);
+    setIsRerunRequired(false);
+
+    try {
+      const response = await fetch("/api/debug/generate_sample");
+      if (!response.ok) throw new Error("Failed to start debug session");
+
+      const data = await response.json();
+      console.log('debug response', data);
+      setSessionId(data.session_id);
+
+      const wsUrl = data.ws_url;
+      ws.current = new WebSocket(wsUrl);
+
+      ws.current.onopen = () => {
+        ws.current?.send(JSON.stringify({ client_id: "frontend" }));
+      };
+
+      ws.current.onmessage = (event) => {
+        const message = JSON.parse(event.data);
+        console.log('ws message', message);
+        if (message.type === "token") {
+          const newToken = {
+            id: `token-${message.token_index}`,
+            text: message.token_text,
+            activation: Math.random(),
+            probabilities: [],
+            timestamp: Date.now(),
+          };
+          setTokens((prev) => [...prev, newToken]);
+        } else if (message.type === "cot") {
+          const newStep: CoTStep = {
+            id: `step-${message.chunk_index}`,
+            tokenRange: [0, 0],
+            stepNumber: message.chunk_index + 1,
+            summary: `Step ${message.chunk_index + 1}`,
+            fullText: message.chunk_text
+          };
+          setCoTSteps((prev) => [...prev, newStep]);
+        } else if (message.type === "generation_end") {
+          setIsRunning(false);
+          fetchHeatmap();
+        }
+      };
+
+      ws.current.onclose = () => setIsRunning(false);
+      ws.current.onerror = (e) => {
+        console.error("WS error", e);
+        setIsRunning(false);
+      };
+
+    } catch (error) {
+      console.error("Debug run failed:", error);
+      setIsRunning(false);
+    }
+  };
+
   const handleRun = async (prompt: string, enableCoT: boolean) => {
     setPrompt(prompt);
     setIsRunning(true);
@@ -38,6 +102,7 @@ export default function Playground() {
     setHeatmapData(undefined);
     setSelectedTokenId(null);
     setSessionId(null);
+    setIsRerunRequired(false);
 
     try {
       const response = await fetch("/api/generate", {
@@ -58,9 +123,10 @@ export default function Playground() {
       }
 
       const data = await response.json();
+      console.log('generate response', data);
       setSessionId(data.session_id);
 
-      const wsUrl = `ws://${window.location.host}${data.ws_url}`;
+      const wsUrl = data.ws_url;
       ws.current = new WebSocket(wsUrl);
 
       ws.current.onopen = () => {
@@ -69,17 +135,28 @@ export default function Playground() {
 
       ws.current.onmessage = (event) => {
         const message = JSON.parse(event.data);
-        if (message.message_type === "token_partial") {
+        console.log('ws message', message);
+        if (message.type === "token") {
           const newToken = {
             id: `token-${message.token_index}`,
-            text: message.token_string,
+            text: message.token_text,
             activation: Math.random(),
             probabilities: [],
             timestamp: Date.now(),
           };
           setTokens((prev) => [...prev, newToken]);
-        } else if (message.message_type === "generation_end") {
+        } else if (message.type === "cot") {
+          const newStep: CoTStep = {
+            id: `step-${message.chunk_index}`,
+            tokenRange: [0, 0], // Placeholder, will be updated later
+            stepNumber: message.chunk_index + 1,
+            summary: `Step ${message.chunk_index + 1}`,
+            fullText: message.chunk_text
+          };
+          setCoTSteps((prev) => [...prev, newStep]);
+        } else if (message.type === "generation_end") {
           setIsRunning(false);
+          fetchHeatmap();
         }
       };
 
@@ -97,22 +174,8 @@ export default function Playground() {
       setIsRunning(false);
     }
   };
-  
-    useEffect(() => {
-    if (sessionId && !isRunning) {
-      const interval = setInterval(() => {
-        fetchTraces(sessionId);
-      }, 5000); // Poll every 5 seconds
 
-      return () => clearInterval(interval);
-    }
-  }, [sessionId, isRunning]);
 
-  useEffect(() => {
-    if (prompt) {
-      handleRun(prompt, true);
-    }
-  }, [temperature]);
 
   useEffect(() => {
     if (sessionId) {
@@ -125,10 +188,10 @@ export default function Playground() {
     if (!sessionId) return;
     setIsLoadingHeatmap(true);
     try {
-      const response = await fetch(`/api/session/${sessionId}/artifact/attention_rollout?layer=${selectedLayer}&head=${selectedHead}&average=${averageHeads}`);
-      if(response.ok) {
+      const response = await fetch(`/api/session/${sessionId}/attn?layer=${selectedLayer}&head=${selectedHead}`);
+      if (response.ok) {
         const heatmapJson = await response.json();
-        setHeatmapData(heatmapJson.data);
+        setHeatmapData(heatmapJson.attn);
       }
     } catch (error) {
       console.error("Error fetching heatmap:", error);
@@ -141,26 +204,26 @@ export default function Playground() {
     try {
       setIsLoadingHeatmap(true);
       const response = await fetch(`/api/session/${sessionId}/traces`);
-      if(response.ok) {
+      if (response.ok) {
         const traces = await response.json();
-          if (traces.status === "completed") {
-            fetchHeatmap();
-            if (traces.precomputed && traces.precomputed.length > 0) {
-                const cotArtifact = traces.precomputed.find((p: any) => p.name === "cot_steps");
-                if (cotArtifact) {
-                    const cotResponse = await fetch(`/api/session/${sessionId}/artifact/cot_steps`);
-                    if(cotResponse.ok) {
-                        const cotJson = await cotResponse.json();
-                        setCoTSteps(cotJson.data);
-                    }
-                }
+        if (traces.status === "completed") {
+          fetchHeatmap();
+          if (traces.precomputed && traces.precomputed.length > 0) {
+            const cotArtifact = traces.precomputed.find((p: any) => p.name === "cot_steps");
+            if (cotArtifact) {
+              const cotResponse = await fetch(`/api/session/${sessionId}/artifact/cot_steps`);
+              if (cotResponse.ok) {
+                const cotJson = await cotResponse.json();
+                setCoTSteps(cotJson.data);
+              }
             }
+          }
         }
       }
     } catch (error) {
-        console.error("Error fetching traces:", error);
+      console.error("Error fetching traces:", error);
     } finally {
-        setIsLoadingHeatmap(false);
+      setIsLoadingHeatmap(false);
     }
   };
 
@@ -191,20 +254,28 @@ export default function Playground() {
             <div className="lg:col-span-7 space-y-8" style={{ animationDelay: "100ms" }}>
               <div id="prompt-editor">
                 <Card className="glass-card group hover:bg-white/10 transition-colors duration-300 stagger animate-slide-up">
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2">
-                    <MessageSquare className="w-5 h-5" />
-                    <span>Prompt Editor</span>
-                  </CardTitle>
-                </CardHeader>
-                <Separator />
-                <CardContent>
-                  <PromptEditor
-                    onRun={handleRun}
-                    isRunning={isRunning}
-                    onCancel={handleCancel}
-                  />
-                </CardContent>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      <MessageSquare className="w-5 h-5" />
+                      <span>Prompt Editor</span>
+                    </CardTitle>
+                  </CardHeader>
+                  <Separator />
+                  <CardContent>
+                    <PromptEditor
+                      onRun={handleRun}
+                      isRunning={isRunning}
+                      onCancel={handleCancel}
+                    />
+                    <div className="mt-2 flex justify-end">
+                      <button
+                        onClick={handleDebugRun}
+                        className="text-xs text-muted-foreground hover:text-primary underline"
+                      >
+                        Run Debug Sample
+                      </button>
+                    </div>
+                  </CardContent>
                 </Card>
               </div>
 
@@ -222,9 +293,13 @@ export default function Playground() {
                 <CardContent>
                   <ModelControls
                     temperature={temperature}
-                    onTemperatureChange={setTemperature}
+                    onTemperatureChange={(value) => {
+                      setTemperature(value);
+                      setIsRerunRequired(true);
+                    }}
                     model={model}
                     onModelChange={setModel}
+                    isRerunRequired={isRerunRequired}
                   />
                 </CardContent>
               </Card>
@@ -246,6 +321,7 @@ export default function Playground() {
                     selectedTokenId={selectedTokenId}
                     onTokenSelect={setSelectedTokenId}
                     isStreaming={isRunning}
+                    isLoading={false}
                   />
                 </CardContent>
               </Card>
@@ -265,6 +341,7 @@ export default function Playground() {
                   <CoTPanel
                     steps={cotSteps}
                     onHighlightTokens={handleHighlightTokens}
+                    isLoading={false}
                   />
                 </CardContent>
               </Card>

@@ -1,0 +1,26 @@
+{
+    "session_id": "e52989bd-6d5f-4665-a33b-4e5752b5ef7d",
+    "created_at": "2025-11-21T11:20:52.083876+00:00",
+    "model_name": "gpt2",
+    "model_config": {},
+    "capture_config": {
+        "capture_logits": true,
+        "capture_hidden_states": true,
+        "capture_attentions": true,
+        "capture_layers": 6,
+        "dtype_store": "float16",
+        "stream_mode": false,
+        "max_seq_len_to_keep": 1024,
+        "session_persistence_config": {
+            "artifact_dir": "artifacts",
+            "compress": true
+        },
+        "deterministic_seed": null
+    },
+    "prompt": "the quick dog jumps over the lazy fox",
+    "prompt_hash": "5b3d97611499d504e72cc37be7ab2cd63e4035d1803b8cbe23d4a964edd8fd5a",
+    "length_prompt_tokens": 0,
+    "length_generated_tokens": 128,
+    "random_seed": null,
+    "hardware_snapshot": {}
+}

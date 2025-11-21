@@ -14,9 +14,10 @@ export interface CoTStep {
 interface CoTPanelProps {
   steps: CoTStep[];
   onHighlightTokens: (tokenRange: [number, number]) => void;
+  isLoading: boolean;
 }
 
-export const CoTPanel = ({ steps, onHighlightTokens }: CoTPanelProps) => {
+export const CoTPanel = ({ steps, onHighlightTokens, isLoading }: CoTPanelProps) => {
   const [expandedSteps, setExpandedSteps] = useState<Set<string>>(new Set());
 
   const toggleStep = (stepId: string) => {
@@ -30,6 +31,16 @@ export const CoTPanel = ({ steps, onHighlightTokens }: CoTPanelProps) => {
       return next;
     });
   };
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center h-32 border border-dashed border-border rounded-lg">
+        <p className="text-sm text-muted-foreground animate-pulse">
+          Loading analysis...
+        </p>
+      </div>
+    );
+  }
 
   if (steps.length === 0) {
     return (

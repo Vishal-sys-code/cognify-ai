@@ -14,6 +14,7 @@ interface TokenTimelineProps {
   selectedTokenId: string | null;
   onTokenSelect: (tokenId: string) => void;
   isStreaming: boolean;
+  isLoading: boolean;
 }
 
 export const TokenTimeline = ({
@@ -21,6 +22,7 @@ export const TokenTimeline = ({
   selectedTokenId,
   onTokenSelect,
   isStreaming,
+  isLoading,
 }: TokenTimelineProps) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevTokenCountRef = useRef(tokens.length);
@@ -39,6 +41,16 @@ export const TokenTimeline = ({
     prevTokenCountRef.current = tokens.length;
   }, [tokens.length, isStreaming]);
 
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center h-24 border border-dashed border-border rounded-lg">
+        <p className="text-sm text-muted-foreground animate-pulse">
+          Loading analysis...
+        </p>
+      </div>
+    );
+  }
+  
   if (tokens.length === 0) {
     return (
       <div className="flex items-center justify-center h-24 border border-dashed border-border rounded-lg">
